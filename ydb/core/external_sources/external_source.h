@@ -1,9 +1,12 @@
 #pragma once
 
+#include <library/cpp/threading/future/core/future.h>
 #include <util/generic/map.h>
 #include <util/generic/string.h>
 
+#include <ydb/core/kqp/provider/yql_kikimr_gateway.h>
 #include <ydb/core/protos/external_sources.pb.h>
+#include <ydb/library/actors/core/actorsystem.h>
 #include <ydb/library/yql/public/issue/yql_issue.h>
 
 namespace NKikimr::NExternalSource {
@@ -54,6 +57,17 @@ struct IExternalSource : public TThrRefBase {
         If an error occurs, an exception is thrown.
     */
     virtual void ValidateExternalDataSource(const TString& externalDataSourceDescription) const = 0;
+
+    /*
+        Retrieve additional metadata from runtime data, enrich provided metadata
+    */
+    virtual NThreading::TFuture<NYql::TKikimrTableMetadataPtr> LoadDynamicMetadata(NActors::TActorSystem* actorSystem, NYql::TKikimrTableMetadataPtr parameters) = 0;
+
+    /*
+        A method that should tell whether there is an implementation
+        of the previous method.
+    */
+    virtual bool CanLoadDynamicMetadata() const = 0;
 };
 
 }

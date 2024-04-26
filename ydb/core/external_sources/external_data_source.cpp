@@ -52,6 +52,15 @@ struct TExternalDataSource : public IExternalSource {
         ValidateHostname(HostnamePatterns, proto.GetLocation());
     }
 
+    virtual NThreading::TFuture<NYql::TKikimrTableMetadataPtr> LoadDynamicMetadata(NActors::TActorSystem* actorSystem, NYql::TKikimrTableMetadataPtr parameters) override {
+        Y_UNUSED(actorSystem, parameters);
+        return NThreading::MakeFuture(std::move(parameters));
+    }
+
+    virtual bool CanLoadDynamicMetadata() const override {
+        return false;
+    }
+
 private:
     const TString Name;
     const TVector<TString> AuthMethods;

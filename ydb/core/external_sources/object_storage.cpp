@@ -254,6 +254,15 @@ struct TObjectStorageExternalSource : public IExternalSource {
         return issues;
     }
 
+    virtual NThreading::TFuture<NYql::TKikimrTableMetadataPtr> LoadDynamicMetadata(NActors::TActorSystem* actorSystem, NYql::TKikimrTableMetadataPtr parameters) override {
+        Y_UNUSED(actorSystem, parameters);
+        return NThreading::MakeFuture(std::move(parameters));
+    }
+
+    virtual bool CanLoadDynamicMetadata() const override {
+        return false;
+    }
+
 private:
     static bool IsValidIntervalUnit(const TString& unit) {
         static constexpr std::array<std::string_view, 7> IntervalUnits = {

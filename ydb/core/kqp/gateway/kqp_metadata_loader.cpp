@@ -2,6 +2,7 @@
 #include "actors/kqp_ic_gateway_actors.h"
 
 #include <ydb/core/base/path.h>
+#include <ydb/core/external_sources/external_source_factory.h>
 #include <ydb/core/kqp/federated_query/kqp_federated_query_actors.h>
 #include <ydb/core/kqp/gateway/utils/scheme_helpers.h>
 #include <ydb/core/statistics/events.h>
@@ -9,6 +10,7 @@
 
 #include <ydb/library/actors/core/hfunc.h>
 #include <ydb/library/actors/core/log.h>
+#include <ydb/library/yql/utils/signals/utils.h>
 
 
 namespace NKikimr::NKqp {
@@ -64,7 +66,7 @@ NavigateEntryResult CreateNavigateEntry(const std::pair<TIndexId, TString>& pair
     entry.Operation = NSchemeCache::TSchemeCacheNavigate::EOp::OpList;
     entry.SyncVersion = true;
     entry.ShowPrivatePath = settings.WithPrivateTables_;
-    return {entry, pair.second, std::nullopt};
+    return {std::move(entry), pair.second, std::nullopt};
 }
 
 std::optional<NavigateEntryResult> CreateNavigateExternalEntry(const TString& path, bool externalDataSource) {
@@ -280,6 +282,7 @@ TTableMetadataResult GetExternalDataSourceMetadataResult(const NSchemeCache::TSc
     tableMeta->ExternalSource.DataSourceAuth = description.GetAuth();
     tableMeta->ExternalSource.Properties = description.GetProperties();
     tableMeta->ExternalSource.DataSourcePath = tableName;
+    tableMeta->ExternalSource.TableLocation = JoinPath(entry.Path);
     return result;
 }
 
@@ -681,9 +684,11 @@ NThreading::TFuture<TTableMetadataResult> TKqpTableMetadataLoader::LoadTableMeta
     // In this syntax, information about path_in_external_system is already known and we only need information about external_data_source.
     // To do this, we go to the DefaultCluster and get information about external_data_source from scheme shard
     const bool resolveEntityInsideDataSource = (cluster != Cluster);
+    TMaybe<TString> externalPath;
     TPath entityName = id;
     if constexpr (std::is_same_v<TPath, TString>) {
         if (resolveEntityInsideDataSource) {
+            externalPath = entityName;
             entityName = cluster;
         }
     } else {
@@ -721,7 +726,7 @@ NThreading::TFuture<TTableMetadataResult> TKqpTableMetadataLoader::LoadTableMeta
         ActorSystem,
         schemeCacheId,
         ev.Release(),
-        [userToken, database, cluster, mainCluster = Cluster, table, settings, expectedSchemaVersion, this, queryName]
+        [userToken, database, cluster, mainCluster = Cluster, table, settings, expectedSchemaVersion, this, queryName, externalPath]
             (TPromise<TResult> promise, TResponse&& response) mutable
         {
             try {
@@ -760,16 +765,35 @@ NThreading::TFuture<TTableMetadataResult> TKqpTableMetadataLoader::LoadTableMeta
 
                 switch (entry.Kind) {
                     case EKind::KindExternalDataSource: {
+                        if (externalPath) {
+                            entry.Path = SplitPath(*externalPath);
+                        }
                         auto externalDataSourceMetadata = GetLoadTableMetadataResult(entry, cluster, mainCluster, table);
                         if (!externalDataSourceMetadata.Success() || !settings.RequestAuthInfo_) {
                             promise.SetValue(externalDataSourceMetadata);
                             return;
                         }
                         LoadExternalDataSourceSecretValues(entry, userToken, MaximalSecretsSnapshotWaitTime, ActorSystem)
-                            .Subscribe([promise, externalDataSourceMetadata](const TFuture<TEvDescribeSecretsResponse::TDescription>& result) mutable
+                            .Subscribe([promise, externalDataSourceMetadata, settings, this](const TFuture<TEvDescribeSecretsResponse::TDescription>& result) mutable
                         {
                             UpdateExternalDataSourceSecretsValue(externalDataSourceMetadata, result.GetValue());
-                            promise.SetValue(externalDataSourceMetadata);
+                            NExternalSource::IExternalSourceFactory* ExternalSourceFactory = nullptr;
+                            auto externalSource = ExternalSourceFactory->GetOrCreate(externalDataSourceMetadata.Metadata->ExternalSource.Type);
+                            if (settings.ShouldInferSchema_ && externalSource->CanLoadDynamicMetadata()) {
+                                externalSource->LoadDynamicMetadata(ActorSystem, std::move(externalDataSourceMetadata.Metadata))
+                                    .Subscribe([promise = std::move(promise)](TFuture<NYql::TKikimrTableMetadataPtr>& result) mutable {
+                                        TTableMetadataResult wrapper;
+                                        if (result.HasValue()) {
+                                            wrapper.SetSuccess();
+                                            wrapper.Metadata = std::move(result).ExtractValue();
+                                        } else {
+                                            // TODO: forward exception from result
+                                            wrapper.SetException(yexception() << "LoadDynamicMetadata failed");
+                                        }
+                                    });
+                            } else {
+                                promise.SetValue(externalDataSourceMetadata);
+                            }
                         });
                         break;
                     }
@@ -786,7 +810,8 @@ NThreading::TFuture<TTableMetadataResult> TKqpTableMetadataLoader::LoadTableMeta
                             .Apply([promise, externalTableMetadata](const TFuture<TTableMetadataResult>& result) mutable
                         {
                             auto externalDataSourceMetadata = result.GetValue();
-                            promise.SetValue(EnrichExternalTable(externalTableMetadata, externalDataSourceMetadata));
+                            auto newMetadata = EnrichExternalTable(externalTableMetadata, externalDataSourceMetadata);
+                            promise.SetValue(std::move(externalTableMetadata));
                         });
                         break;
                     }
