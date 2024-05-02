@@ -20,8 +20,9 @@ namespace NKikimr::NExternalSource {
 namespace {
 
 struct TObjectStorageExternalSource : public IExternalSource {
-    explicit TObjectStorageExternalSource(const std::vector<TRegExMatch>& hostnamePatterns)
+    explicit TObjectStorageExternalSource(const std::vector<TRegExMatch>& hostnamePatterns, NActors::TActorSystem* actorSystem)
         : HostnamePatterns(hostnamePatterns)
+        , ActorSystem(actorSystem)
     {}
 
     virtual TString Pack(const NKikimrExternalSources::TSchema& schema,
@@ -254,13 +255,30 @@ struct TObjectStorageExternalSource : public IExternalSource {
         return issues;
     }
 
-    virtual NThreading::TFuture<NYql::TKikimrTableMetadataPtr> LoadDynamicMetadata(NActors::TActorSystem* actorSystem, NYql::TKikimrTableMetadataPtr parameters) override {
-        Y_UNUSED(actorSystem, parameters);
-        return NThreading::MakeFuture(std::move(parameters));
+    virtual NThreading::TFuture<std::shared_ptr<TMetadata>> LoadDynamicMetadata(std::shared_ptr<TMetadata> meta) override {
+        Y_UNUSED(ActorSystem);
+        // TODO: implement
+        {
+            TStringBuilder attrs;
+            {
+                attrs << '[';
+                bool first = true;
+                for (const auto& [key, value] : meta->Attributes) {
+                    if (!first) {
+                        attrs << ", ";
+                    }
+                    first = false;
+                    attrs << '{' << key << " : " << value << '}';
+                }
+                attrs << ']';
+            }
+            Cout << "ObjectStorage::LoadDynamicMetadata(attributes=" << attrs << ")" << Endl;
+        }
+        return NThreading::MakeFuture(std::move(meta));
     }
 
     virtual bool CanLoadDynamicMetadata() const override {
-        return false;
+        return true;
     }
 
 private:
@@ -481,12 +499,13 @@ private:
 
 private:
     const std::vector<TRegExMatch> HostnamePatterns;
+    NActors::TActorSystem* ActorSystem = nullptr;
 };
 
 }
 
-IExternalSource::TPtr CreateObjectStorageExternalSource(const std::vector<TRegExMatch>& hostnamePatterns) {
-    return MakeIntrusive<TObjectStorageExternalSource>(hostnamePatterns);
+IExternalSource::TPtr CreateObjectStorageExternalSource(const std::vector<TRegExMatch>& hostnamePatterns, NActors::TActorSystem* actorSystem) {
+    return MakeIntrusive<TObjectStorageExternalSource>(hostnamePatterns, actorSystem);
 }
 
 NYql::TIssues Validate(const FederatedQuery::Schema& schema, const FederatedQuery::ObjectStorageBinding::Subset& objectStorage, size_t pathsLimit) {

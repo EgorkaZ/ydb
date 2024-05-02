@@ -474,6 +474,40 @@ NThreading::TFuture<TEvDescribeSecretsResponse::TDescription> LoadExternalDataSo
     return DescribeExternalDataSourceSecrets(authDescription, userToken ? userToken->GetUserSID() : "", actorSystem, maximalSecretsSnapshotWaitTime);
 }
 
+NExternalSource::TAuth MakeAuth(const NYql::TExternalSource& metadata) {
+    switch (metadata.DataSourceAuth.identity_case()) {
+    case NKikimrSchemeOp::TAuth::kNone:
+        return NExternalSource::NAuth::MakeNone();
+    case NKikimrSchemeOp::TAuth::kServiceAccount:
+        return NExternalSource::NAuth::MakeServiceAccount(metadata.DataSourceAuth.GetServiceAccount().GetId(), metadata.ServiceAccountIdSignature);
+    case NKikimrSchemeOp::TAuth::kAws:
+        return NExternalSource::NAuth::MakeAws(metadata.AwsAccessKeyId, metadata.AwsSecretAccessKey, metadata.DataSourceAuth.GetAws().GetAwsRegion());
+    case NKikimrSchemeOp::TAuth::kBasic:
+    case NKikimrSchemeOp::TAuth::kMdbBasic:
+    case NKikimrSchemeOp::TAuth::kToken:
+    case NKikimrSchemeOp::TAuth::IDENTITY_NOT_SET:
+        Y_ABORT("Unimplemented external source auth: %d", metadata.DataSourceAuth.identity_case());
+        break;
+    }
+    Y_UNREACHABLE();
+}
+
+std::shared_ptr<NExternalSource::TMetadata> ConvertToExternalSourceMetadata(const NYql::TKikimrTableMetadata& tableMetadata) {
+    auto metadata = std::make_shared<NExternalSource::TMetadata>();
+    metadata->TableLocation = tableMetadata.ExternalSource.TableLocation;
+    metadata->DataSourceLocation = tableMetadata.ExternalSource.DataSourceLocation;
+    metadata->DataSourcePath = tableMetadata.ExternalSource.DataSourcePath;
+    metadata->Attributes = tableMetadata.Attributes;
+    metadata->Auth = MakeAuth(tableMetadata.ExternalSource);
+    return metadata;
+}
+
+bool EnrichMetadata(NYql::TKikimrTableMetadata& tableMetadata, const NExternalSource::TMetadata& dynamicMetadata) {
+    Y_UNUSED(tableMetadata, dynamicMetadata);
+    // TODO: implement
+    return true;
+}
+
 } // anonymous namespace
 
 
@@ -774,22 +808,28 @@ NThreading::TFuture<TTableMetadataResult> TKqpTableMetadataLoader::LoadTableMeta
                             return;
                         }
                         LoadExternalDataSourceSecretValues(entry, userToken, MaximalSecretsSnapshotWaitTime, ActorSystem)
-                            .Subscribe([promise, externalDataSourceMetadata, settings, this](const TFuture<TEvDescribeSecretsResponse::TDescription>& result) mutable
+                            .Subscribe([promise, externalDataSourceMetadata, settings](const TFuture<TEvDescribeSecretsResponse::TDescription>& result) mutable
                         {
                             UpdateExternalDataSourceSecretsValue(externalDataSourceMetadata, result.GetValue());
-                            NExternalSource::IExternalSourceFactory* ExternalSourceFactory = nullptr;
-                            auto externalSource = ExternalSourceFactory->GetOrCreate(externalDataSourceMetadata.Metadata->ExternalSource.Type);
-                            if (settings.ShouldInferSchema_ && externalSource->CanLoadDynamicMetadata()) {
-                                externalSource->LoadDynamicMetadata(ActorSystem, std::move(externalDataSourceMetadata.Metadata))
-                                    .Subscribe([promise = std::move(promise)](TFuture<NYql::TKikimrTableMetadataPtr>& result) mutable {
+                            NExternalSource::IExternalSource::TPtr externalSource;
+                            if (settings.ExternalSourceFactory) {
+                                externalSource = settings.ExternalSourceFactory->GetOrCreate(externalDataSourceMetadata.Metadata->ExternalSource.Type);
+                            }
+
+                            if (externalSource && externalSource->CanLoadDynamicMetadata()) {
+                                auto externalSourceMeta = ConvertToExternalSourceMetadata(*externalDataSourceMetadata.Metadata);
+                                externalSourceMeta->Attributes = settings.Options;
+                                externalSource->LoadDynamicMetadata(std::move(externalSourceMeta))
+                                    .Subscribe([promise = std::move(promise), externalDataSourceMetadata](const TFuture<std::shared_ptr<NExternalSource::TMetadata>>& result) mutable {
                                         TTableMetadataResult wrapper;
-                                        if (result.HasValue()) {
+                                        if (result.HasValue() && EnrichMetadata(*externalDataSourceMetadata.Metadata, *result.GetValue())) {
                                             wrapper.SetSuccess();
-                                            wrapper.Metadata = std::move(result).ExtractValue();
+                                            wrapper.Metadata = externalDataSourceMetadata.Metadata;
                                         } else {
                                             // TODO: forward exception from result
                                             wrapper.SetException(yexception() << "LoadDynamicMetadata failed");
                                         }
+                                        promise.SetValue(wrapper);
                                     });
                             } else {
                                 promise.SetValue(externalDataSourceMetadata);

@@ -707,6 +707,14 @@ public:
                     return true;
                 }
 
+                if (name == "infer") {
+                    TStringBuf data;
+                    if (!ExtractSettingValue(setting.Tail(), "infer"sv, format, {}, ctx, data)) {
+                        return false;
+                    }
+                    return true;
+                }
+
                 YQL_ENSURE(name == "projection"sv);
                 haveProjection = true;
                 if (!EnsureAtom(setting.Tail(), ctx)) {
@@ -723,7 +731,8 @@ public:
             if (!EnsureValidSettings(*input->Child(TS3Object::idx_Settings),
                                      { "compression"sv, "partitionedby"sv, "projection"sv, "data.interval.unit"sv,
                                         "data.datetime.formatname"sv, "data.datetime.format"sv, "data.timestamp.formatname"sv, "data.timestamp.format"sv,
-                                        "readmaxbytes"sv, "csvdelimiter"sv, "directories"sv, "filepattern"sv, "pathpattern"sv, "pathpatternvariant"sv }, validator, ctx))
+                                        "readmaxbytes"sv, "csvdelimiter"sv, "directories"sv, "filepattern"sv, "pathpattern"sv,
+                                    "pathpatternvariant"sv, "infer"sv}, validator, ctx))
             {
                 return TStatus::Error;
             }

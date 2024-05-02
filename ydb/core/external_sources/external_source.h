@@ -4,7 +4,6 @@
 #include <util/generic/map.h>
 #include <util/generic/string.h>
 
-#include <ydb/core/kqp/provider/yql_kikimr_gateway.h>
 #include <ydb/core/protos/external_sources.pb.h>
 #include <ydb/library/actors/core/actorsystem.h>
 #include <ydb/library/yql/public/issue/yql_issue.h>
@@ -12,6 +11,74 @@
 namespace NKikimr::NExternalSource {
 
 struct TExternalSourceException: public yexception {
+};
+
+namespace NAuth {
+
+struct TNone {
+    static constexpr std::string_view Method = "NONE";
+};
+
+struct TAws {
+    static constexpr std::string_view Method = "AWS";
+
+    TAws(const TString& accessKeyId, const TString& secretAccessKey, const TString& region)
+        : AccessKeyId{accessKeyId}
+        , SecretAccessKey{secretAccessKey}
+        , Region{region}
+    {}
+
+    TString AccessKeyId;
+    TString SecretAccessKey;
+    TString Region;
+
+    // TString AccessKeyIdName;
+    // TString SecretAccessKeyName;
+};
+
+struct TServiceAccount {
+    static constexpr std::string_view Method = "SERVICE_ACCOUNT";
+
+    TServiceAccount(TString serviceAccountId, TString serviceAccountIdSignature)
+        : ServiceAccountId{std::move(serviceAccountId)}
+        , ServiceAccountIdSignature{std::move(serviceAccountIdSignature)}
+    {}
+
+    TString ServiceAccountId;
+    TString ServiceAccountIdSignature;
+
+    // TString ServiceAccountIdSignatureName;
+};
+
+using TAuth = std::variant<TNone, TServiceAccount, TAws>;
+
+std::string_view GetMethod(const TAuth& auth);
+
+inline TAuth MakeNone() {
+    return TAuth{std::in_place_type_t<TNone>{}};
+}
+
+inline TAuth MakeServiceAccount(const TString& serviceAccountId, const TString& serviceAccountIdSignature) {
+    return TAuth{std::in_place_type_t<TServiceAccount>{}, serviceAccountId, serviceAccountIdSignature};
+}
+
+inline TAuth MakeAws(const TString& accessKeyId, const TString& secretAccessKey, const TString& region) {
+    return TAuth{std::in_place_type_t<TAws>{}, accessKeyId, secretAccessKey, region};
+}
+}
+
+using TAuth = NAuth::TAuth;
+
+struct TMetadata {
+    TString TableLocation;
+    TString DataSourceLocation;
+    TString DataSourcePath;
+
+    THashMap<TString, TString> Attributes;
+
+    TAuth Auth;
+
+    NKikimrExternalSources::TSchema Schema;
 };
 
 struct IExternalSource : public TThrRefBase {
@@ -61,7 +128,7 @@ struct IExternalSource : public TThrRefBase {
     /*
         Retrieve additional metadata from runtime data, enrich provided metadata
     */
-    virtual NThreading::TFuture<NYql::TKikimrTableMetadataPtr> LoadDynamicMetadata(NActors::TActorSystem* actorSystem, NYql::TKikimrTableMetadataPtr parameters) = 0;
+    virtual NThreading::TFuture<std::shared_ptr<TMetadata>> LoadDynamicMetadata(std::shared_ptr<TMetadata> meta) = 0;
 
     /*
         A method that should tell whether there is an implementation

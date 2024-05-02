@@ -121,6 +121,56 @@ namespace {
 using namespace NKikimr;
 using namespace NNodes;
 
+void GatherReadAttributes(THashMap<std::pair<TString, TString>, THashMap<TString, TString>>& result, const TExprNode& node, TExprContext& ctx);
+
+void ExtractReadAttributes(THashMap<std::pair<TString, TString>, THashMap<TString, TString>>& result, const TExprNode& read, TExprContext& ctx) {
+    GatherReadAttributes(result, *read.Child(0), ctx);
+
+    TKiDataSource source(read.ChildPtr(1));
+    TKikimrKey key{ctx};
+    if (!key.Extract(*read.Child(2))) {
+        return;
+    }
+    auto cluster = source.Cluster().StringValue();
+    auto tablePath = key.GetTablePath();
+
+    if (read.ChildrenSize() <= 4) {
+        return;
+    }
+    auto& astAttrs = *read.Child(4);
+    auto& attrs = *result.try_emplace(std::make_pair(std::move(cluster), std::move(tablePath))).first;
+    for (const auto& child : astAttrs.Children()) {
+        if (!child->IsList() || child->ChildrenSize() != 2) {
+            continue;
+        }
+        if (!(child->Child(0)->IsAtom() && child->Child(1)->IsAtom())) {
+            continue;
+        }
+
+        TCoAtom attrKey{child->Child(0)};
+        TCoAtom attrVal{child->Child(1)};
+
+        attrs.second.try_emplace(attrKey.StringValue(), attrVal.StringValue());
+    }
+}
+
+void GatherReadAttributes(THashMap<std::pair<TString, TString>, THashMap<TString, TString>>& result, const TExprNode& node, TExprContext& ctx) {
+    if (node.IsCallable(ReadName)) {
+        return ExtractReadAttributes(result, node, ctx);
+    } else if (node.IsCallable()) {
+        if (node.ChildrenSize() == 0) {
+            return;
+        }
+        return GatherReadAttributes(result, *node.Child(0), ctx);
+    }
+}
+
+THashMap<std::pair<TString, TString>, THashMap<TString, TString>> GatherReadAttributes(const TExprNode& node, TExprContext& ctx) {
+    THashMap<std::pair<TString, TString>, THashMap<TString, TString>> result;
+    GatherReadAttributes(result, node, ctx);
+    return result;
+}
+
 class TKiSourceIntentDeterminationTransformer: public TKiSourceVisitorTransformer {
 public:
     TKiSourceIntentDeterminationTransformer(TIntrusivePtr<TKikimrSessionContext> sessionCtx)
@@ -224,11 +274,13 @@ public:
         size_t tablesCount = SessionCtx->Tables().GetTables().size();
         TVector<NThreading::TFuture<void>> futures;
         futures.reserve(tablesCount);
+        auto readAttributes = GatherReadAttributes(*input, ctx);
 
         for (auto& it : SessionCtx->Tables().GetTables()) {
             const TString& clusterName = it.first.first;
             const TString& tableName = it.first.second;
             TKikimrTableDescription& table = SessionCtx->Tables().GetTable(clusterName, tableName);
+            auto readAttrs = readAttributes.FindPtr(std::make_pair(clusterName, tableName));
 
             if (table.Metadata || table.GetTableType() != ETableType::Table) {
                 continue;
@@ -247,6 +299,8 @@ public:
                             .WithPrivateTables(IsInternalCall)
                             .WithExternalDatasources(SessionCtx->Config().FeatureFlags.GetEnableExternalDataSources())
                             .WithAuthInfo(table.GetNeedAuthInfo())
+                            .WithExternalSourceFactory(ExternalSourceFactory)
+                            .WithReadOptions(readAttrs ? std::move(*readAttrs) : THashMap<TString, TString>{})
             );
 
             futures.push_back(future.Apply([result, queryType]
